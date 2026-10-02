@@ -1,8 +1,8 @@
 # Starter Face
 
 A pixel-art Garmin Connect IQ watch face for the Forerunner 165 / 165 Music:
-an animated Claude Code mascot, date, time, a heart rate zone bar, heart rate,
-battery, steps, and a step-goal bar.
+an animated Claude Code mascot, time, date, a step-goal bar, a heart rate zone
+bar, heart rate, VO2 max, and battery.
 
 ## Commands
 

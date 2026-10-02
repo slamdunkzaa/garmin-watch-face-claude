@@ -45,13 +45,15 @@ module PixelFont {
         ':' => [0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]
     };
 
-    // Draws every set bit as a dot-sized square on a grid of cell-sized steps.
-    function drawSprite(dc as Dc, x as Number, y as Number, rows as Array<Number>, cols as Number, cell as Number, dot as Number) as Void {
+    // Draws every set bit as a block of cellWidth by cellHeight, shrunk by
+    // gap to leave space between neighbouring blocks.
+    function drawSprite(dc as Dc, x as Number, y as Number, rows as Array<Number>, cols as Number,
+            cellWidth as Number, cellHeight as Number, gap as Number) as Void {
         for (var row = 0; row < rows.size(); row++) {
             var bits = rows[row];
             for (var col = 0; col < cols; col++) {
                 if ((bits & (1 << (cols - 1 - col))) != 0) {
-                    dc.fillRectangle(x + col * cell, y + row * cell, dot, dot);
+                    dc.fillRectangle(x + col * cellWidth, y + row * cellHeight, cellWidth - gap, cellHeight - gap);
                 }
             }
         }
@@ -72,21 +74,23 @@ module PixelFont {
     }
 
     // x is the left edge and y the top edge of the text.
-    function drawText(dc as Dc, x as Number, y as Number, text as String, cell as Number, dot as Number) as Void {
+    function drawText(dc as Dc, x as Number, y as Number, text as String,
+            cellWidth as Number, cellHeight as Number, gap as Number) as Void {
         var chars = text.toCharArray();
 
         for (var i = 0; i < chars.size(); i++) {
             var cols = glyphCols(chars[i]);
             var rows = GLYPHS[chars[i]];
             if (rows != null) {
-                drawSprite(dc, x, y, rows, cols, cell, dot);
+                drawSprite(dc, x, y, rows, cols, cellWidth, cellHeight, gap);
             }
-            x += (cols + 1) * cell;
+            x += (cols + 1) * cellWidth;
         }
     }
 
-    function drawTextCentered(dc as Dc, centerX as Number, y as Number, text as String, cell as Number, dot as Number) as Void {
-        drawText(dc, centerX - textWidth(text, cell) / 2, y, text, cell, dot);
+    function drawTextCentered(dc as Dc, centerX as Number, y as Number, text as String,
+            cellWidth as Number, cellHeight as Number, gap as Number) as Void {
+        drawText(dc, centerX - textWidth(text, cellWidth) / 2, y, text, cellWidth, cellHeight, gap);
     }
 
 }
