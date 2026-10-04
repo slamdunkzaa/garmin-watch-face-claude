@@ -77,6 +77,21 @@ from the same menu.
 - **"Device ... is UNKNOWN in libmtp"**: harmless; libmtp just has no entry
   for this model yet.
 
+## Saving changes to GitHub
+
+`origin` is this repo and `upstream` is the original project it came from.
+After changing the code:
+
+```bash
+git add -A                          # stage every changed file
+git commit -m "Describe the change"
+git push                            # send it to origin/main
+```
+
+The first push from a new machine needs `brew install gh` and
+`gh auth login` (GitHub.com, HTTPS, log in with a web browser). To bring in
+later changes from the original project, run `git pull upstream main`.
+
 ## Layout
 
 - `manifest.xml` – app id, type, supported devices, permissions
