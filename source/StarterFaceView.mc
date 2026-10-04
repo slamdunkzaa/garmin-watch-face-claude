@@ -3,6 +3,7 @@ import Toybox.ActivityMonitor;
 import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.Math;
+import Toybox.SensorHistory;
 import Toybox.System;
 import Toybox.Time;
 import Toybox.Time.Gregorian;
@@ -16,6 +17,7 @@ class StarterFaceView extends WatchUi.WatchFace {
     private const RED = 0xFF5555;
     private const GREEN = 0x55FF55;
     private const BLUE = 0x00AAFF;
+    private const YELLOW = 0xFFAA00;
     private const EMPTY_COLOR = 0x555555;
 
     // The screen is laid out on a grid of this many "pixels" across.
@@ -25,12 +27,18 @@ class StarterFaceView extends WatchUi.WatchFace {
     // block above them is TOP_RATIO times as tall.
     private const BOTTOM_ROWS = 20;
     private const TOP_RATIO = 1.61;
+    // Grid columns from the center of the screen to the center of the mascot.
+    private const LOGO_OFFSET = 29;
 
     // Garmin's zone colors, zone 1 to zone 5.
     private const ZONE_COLORS as Array<Number> = [0xAAAAAA, 0x00AAFF, 0x55FF55, 0xFFAA00, 0xFF5555];
 
     private const FRAME_MS = 250;
     private const BLINK_FRAMES = 12;
+    // Body Battery at or above which the mascot bounces, and below which
+    // it is sleepy.
+    private const ENERGETIC_LEVEL = 70;
+    private const TIRED_LEVEL = 30;
 
     // The mascot without its feet, 16 columns wide.
     private const MASCOT_COLS = 16;
@@ -39,7 +47,8 @@ class StarterFaceView extends WatchUi.WatchFace {
     private const FEET as Array<Number> = [0x1428, 0x0408, 0x1020];
 
     private const HEART as Array<Number> = [0x36, 0x7F, 0x7F, 0x7F, 0x3E, 0x1C, 0x08];
-    private const LUNGS as Array<Number> = [0x08, 0x08, 0x3E, 0x77, 0x77, 0x77, 0x63];
+    private const BOLT as Array<Number> = [0x0E, 0x1C, 0x38, 0x7E, 0x1C, 0x18, 0x10];
+    private const STRESS as Array<Number> = [0x14, 0x36, 0x63, 0x00, 0x63, 0x36, 0x14];
     private const BATTERY as Array<Number> = [0x00, 0xFE, 0x83, 0x83, 0x83, 0xFE, 0x00];
     private const BATTERY_LEVELS = 5;
 
@@ -49,8 +58,14 @@ class StarterFaceView extends WatchUi.WatchFace {
 
     private var _isSleeping as Boolean = false;
     private var _px as Number = 4;
+    // Cell size of the Body Battery text, a little smaller than the date.
+    private var _smallPx as Number = 3;
     private var _zones as Array<Number>?;
-    private var _vo2Max as Number?;
+    private var _bodyBattery as Number?;
+    private var _stress as Number?;
+    // Minute of the hour the sensor history was read in, so it is read
+    // once a minute rather than on every animation frame.
+    private var _historyMin as Number = -1;
     private var _timer as Timer.Timer?;
     // Animation frame of the mascot; 0 while it stands still.
     private var _frame as Number = 0;
@@ -61,13 +76,11 @@ class StarterFaceView extends WatchUi.WatchFace {
 
     function onLayout(dc as Dc) as Void {
         _px = dc.getWidth() / GRID_SIZE;
+        _smallPx = 3 * _px / 4;
     }
 
     function onShow() as Void {
-        var profile = UserProfile.getProfile();
-
         _zones = UserProfile.getHeartRateZones(UserProfile.HR_ZONE_SPORT_GENERIC);
-        _vo2Max = profile.vo2maxRunning != null ? profile.vo2maxRunning : profile.vo2maxCycling;
     }
 
     function onHide() as Void {
@@ -77,6 +90,7 @@ class StarterFaceView extends WatchUi.WatchFace {
     function onUpdate(dc as Dc) as Void {
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_BLACK);
         dc.clear();
+        readSensorHistory();
 
         if (_isSleeping && needsBurnInProtection()) {
             drawAlwaysOn(dc);
@@ -96,6 +110,7 @@ class StarterFaceView extends WatchUi.WatchFace {
         drawStepBar(dc, centerX, bottom, activityInfo);
         drawZoneBar(dc, centerX, bottom + 6 * px, heartRate);
         drawStats(dc, centerX, bottom + 13 * px, heartRate);
+        drawBodyBattery(dc, centerX - LOGO_OFFSET * px, top + topHeight - 7 * _smallPx);
     }
 
     // AMOLED always-on mode: mascot, time and date only, drawn dimmer and
@@ -113,14 +128,16 @@ class StarterFaceView extends WatchUi.WatchFace {
         return Math.round(BOTTOM_ROWS * _px * TOP_RATIO).toNumber();
     }
 
-    // Mascot on the left, time over date on the right. gap is the space
-    // left between the pixels of the mascot and time.
+    // Mascot on the left, time over date on the right, with the mascot
+    // standing just above the Body Battery text, which shares the date's
+    // bottom edge. gap is the space left between
+    // the pixels of the mascot and time.
     private function drawHeader(dc as Dc, centerX as Number, top as Number, height as Number,
             timeColor as ColorType, gap as Number) as Void {
         var px = _px;
         var textX = centerX - 13 * px;
 
-        drawLogo(dc, centerX - 29 * px, top + height / 2, gap);
+        drawLogo(dc, centerX - LOGO_OFFSET * px, top + height - 7 * _smallPx - px, gap);
 
         dc.setColor(timeColor, Graphics.COLOR_TRANSPARENT);
         PixelFont.drawText(dc, textX, top, getTimeString(), 2 * px, 3 * px, gap);
@@ -129,66 +146,88 @@ class StarterFaceView extends WatchUi.WatchFace {
         PixelFont.drawText(dc, textX, top + height - 7 * px, getDateString(), px, px, gap / 2);
     }
 
-    // Draws the mascot centered on the given point. While animating it
-    // walks on the spot and blinks now and then.
-    private function drawLogo(dc as Dc, centerX as Number, centerY as Number, gap as Number) as Void {
+    // Draws the mascot centered on centerX with its feet on bottom. While
+    // animating it walks on the spot and blinks now and then; its mood
+    // follows Body Battery: it bounces when full and walks slowly with
+    // heavy eyelids when low.
+    private function drawLogo(dc as Dc, centerX as Number, bottom as Number, gap as Number) as Void {
         // Stretched tall like the time digits next to it.
-        var cellWidth = 7 * _px / 4;
-        var cellHeight = 9 * _px / 4;
+        var cellWidth = 6 * _px / 4;
+        var cellHeight = 8 * _px / 4;
         var x = centerX - MASCOT_COLS * cellWidth / 2;
-        var y = centerY - (MASCOT.size() + 1) * cellHeight / 2;
-        var feet = _frame == 0 ? 0 : 1 + _frame % 2;
+        var y = bottom - (MASCOT.size() + 1) * cellHeight;
+        var bodyBattery = _bodyBattery;
+        var tired = bodyBattery != null && bodyBattery < TIRED_LEVEL;
+        var energetic = bodyBattery != null && bodyBattery >= ENERGETIC_LEVEL;
+        var step = tired ? _frame / 2 : _frame;
+        var feet = _frame == 0 ? 0 : 1 + step % 2;
+        var blink = _frame % BLINK_FRAMES == BLINK_FRAMES - 1;
+
+        if (energetic && _frame % 2 == 1) {
+            y -= cellHeight;
+        }
 
         dc.setColor(ORANGE, Graphics.COLOR_TRANSPARENT);
         PixelFont.drawSprite(dc, x, y, MASCOT, MASCOT_COLS, cellWidth, cellHeight, gap);
         PixelFont.drawSprite(dc, x, y + MASCOT.size() * cellHeight, [FEET[feet]], MASCOT_COLS, cellWidth, cellHeight, gap);
 
-        if (_frame % BLINK_FRAMES == BLINK_FRAMES - 1) {
-            // Close the top half of each eye.
-            dc.fillRectangle(x + 4 * cellWidth, y + 2 * cellHeight, cellWidth, cellHeight);
-            dc.fillRectangle(x + 11 * cellWidth, y + 2 * cellHeight, cellWidth, cellHeight);
+        if (blink || tired) {
+            // Close the top half of each eye, or all of it when a tired
+            // mascot blinks.
+            var lid = blink && tired ? 2 * cellHeight : cellHeight;
+            dc.fillRectangle(x + 4 * cellWidth, y + 2 * cellHeight, cellWidth, lid);
+            dc.fillRectangle(x + 11 * cellWidth, y + 2 * cellHeight, cellWidth, lid);
         }
     }
 
-    // Heart rate, VO2 max and battery side by side, centered on centerX.
+    // Heart rate, stress and battery side by side, centered on centerX.
     private function drawStats(dc as Dc, centerX as Number, y as Number, heartRate as Number?) as Void {
         var gap = 3 * _px;
-        var vo2Max = _vo2Max;
+        var stress = _stress;
         var battery = System.getSystemStats().battery;
         var heartRateText = heartRate != null ? heartRate.toString() : "--";
-        var vo2MaxText = vo2Max != null ? vo2Max.toString() : "--";
+        var stressText = stress != null ? stress.toString() : "--";
         var batteryText = battery.format("%d") + "%";
-        var heartRateWidth = statWidth(7, heartRateText);
-        var vo2MaxWidth = statWidth(7, vo2MaxText);
-        var x = centerX - (heartRateWidth + vo2MaxWidth + statWidth(8, batteryText) + 2 * gap) / 2;
+        var heartRateWidth = statWidth(7, heartRateText, _px);
+        var stressWidth = statWidth(7, stressText, _px);
+        var x = centerX - (heartRateWidth + stressWidth + statWidth(8, batteryText, _px) + 2 * gap) / 2;
 
-        drawStat(dc, x, y, HEART, 7, RED, heartRateText);
+        drawStat(dc, x, y, HEART, 7, RED, heartRateText, _px);
         x += heartRateWidth + gap;
-        drawStat(dc, x, y, LUNGS, 7, BLUE, vo2MaxText);
-        x += vo2MaxWidth + gap;
+        drawStat(dc, x, y, STRESS, 7, YELLOW, stressText, _px);
+        x += stressWidth + gap;
         drawBattery(dc, x, y, battery, batteryText);
     }
 
-    private function statWidth(iconCols as Number, value as String) as Number {
-        return (iconCols + 2) * _px + PixelFont.textWidth(value, _px);
+    // Body Battery under the mascot, centered on centerX.
+    private function drawBodyBattery(dc as Dc, centerX as Number, y as Number) as Void {
+        var bodyBattery = _bodyBattery;
+        var text = bodyBattery != null ? bodyBattery.toString() : "--";
+
+        var cell = _smallPx;
+
+        drawStat(dc, centerX - statWidth(7, text, cell) / 2, y, BOLT, 7, BLUE, text, cell);
     }
 
-    // Draws an icon followed by a value, with its left edge at x.
-    private function drawStat(dc as Dc, x as Number, y as Number, icon as Array<Number>, iconCols as Number,
-            iconColor as ColorType, value as String) as Void {
-        var px = _px;
+    private function statWidth(iconCols as Number, value as String, cell as Number) as Number {
+        return (iconCols + 2) * cell + PixelFont.textWidth(value, cell);
+    }
 
+    // Draws an icon followed by a value, with its left edge at x, in
+    // blocks of cell.
+    private function drawStat(dc as Dc, x as Number, y as Number, icon as Array<Number>, iconCols as Number,
+            iconColor as ColorType, value as String, cell as Number) as Void {
         dc.setColor(iconColor, Graphics.COLOR_TRANSPARENT);
-        PixelFont.drawSprite(dc, x, y, icon, iconCols, px, px, 0);
+        PixelFont.drawSprite(dc, x, y, icon, iconCols, cell, cell, 0);
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-        PixelFont.drawText(dc, x + (iconCols + 2) * px, y, value, px, px, 0);
+        PixelFont.drawText(dc, x + (iconCols + 2) * cell, y, value, cell, cell, 0);
     }
 
     private function drawBattery(dc as Dc, x as Number, y as Number, battery as Float, text as String) as Void {
         var px = _px;
         var level = Math.ceil(battery * BATTERY_LEVELS / 100).toNumber();
 
-        drawStat(dc, x, y, BATTERY, 8, Graphics.COLOR_WHITE, text);
+        drawStat(dc, x, y, BATTERY, 8, Graphics.COLOR_WHITE, text, px);
         dc.setColor(level > 1 ? GREEN : RED, Graphics.COLOR_TRANSPARENT);
         dc.fillRectangle(x + px, y + 2 * px, level * px, 3 * px);
     }
@@ -265,6 +304,33 @@ class StarterFaceView extends WatchUi.WatchFace {
             }
         }
         return heartRate;
+    }
+
+    private function readSensorHistory() as Void {
+        var min = System.getClockTime().min;
+
+        if (min == _historyMin || !(Toybox has :SensorHistory)) {
+            return;
+        }
+        _historyMin = min;
+        if (SensorHistory has :getBodyBatteryHistory) {
+            _bodyBattery = latestSample(SensorHistory.getBodyBatteryHistory({:period => 1}));
+        }
+        if (SensorHistory has :getStressHistory) {
+            _stress = latestSample(SensorHistory.getStressHistory({:period => 1}));
+        }
+    }
+
+    private function latestSample(history as SensorHistory.SensorHistoryIterator) as Number? {
+        var sample = history.next();
+
+        if (sample != null) {
+            var data = sample.data;
+            if (data != null) {
+                return data.toNumber();
+            }
+        }
+        return null;
     }
 
     // Timers may only run while the watch face is awake.
